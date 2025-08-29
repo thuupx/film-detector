@@ -1,0 +1,13 @@
+[project]
+name = "film-detector"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.3.2",
+    "scikit-learn>=1.6.1",
+    "torch",
+    "torchvision",
+    "tqdm>=4.67.1",
+]
