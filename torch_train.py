@@ -30,13 +30,13 @@ from tqdm import tqdm
 
 # --- Configuration ---
 JSON_DATA_FILE = "recipes.json"
-IMG_WIDTH, IMG_HEIGHT = 224, 224
+IMG_WIDTH, IMG_HEIGHT = 288, 288
 SAVED_MODEL_PATH = "model/model.pt"
 TOOLS_PATH = "model/tools.pkl"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Performance/batching config (override via env vars if needed)
-BATCH_TRAIN = int(os.getenv("BATCH_TRAIN", "32"))
-BATCH_VAL = int(os.getenv("BATCH_VAL", "64"))
+BATCH_TRAIN = int(os.getenv("BATCH_TRAIN", "16"))
+BATCH_VAL = int(os.getenv("BATCH_VAL", "32"))
 DEFAULT_WORKERS = max(1, (os.cpu_count() or 1) - 1)  # leave 1 core free by default
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", str(DEFAULT_WORKERS)))
 PIN_MEMORY = bool(torch.cuda.is_available())
@@ -150,8 +150,8 @@ class RecipesDataset(Dataset):
 class MultiHeadMobileNet(nn.Module):
     def __init__(self, class_counts: Dict[str, int], num_numeric: int):
         super().__init__()
-        backbone = models.efficientnet_b0(
-            weights=models.EfficientNet_B0_Weights.DEFAULT
+        backbone = models.efficientnet_b2(
+            weights=models.EfficientNet_B2_Weights.DEFAULT
         )
         self.features = backbone.features
         self.pool = nn.AdaptiveAvgPool2d((1, 1))
@@ -193,26 +193,14 @@ class MultiHeadMobileNet(nn.Module):
 
 def create_transforms(train: bool) -> T.Compose:
     if train:
+        # Style-preserving, lighter augmentations to keep film look cues
         return T.Compose(
             [
                 T.Resize((IMG_HEIGHT, IMG_WIDTH)),
                 T.RandomHorizontalFlip(),
-                T.RandomApply(
-                    [
-                        T.ColorJitter(
-                            brightness=0.25, contrast=0.25, saturation=0.25, hue=0.02
-                        )
-                    ],
-                    p=0.7,
-                ),
-                T.RandAugment(num_ops=2, magnitude=7),
-                T.RandomAffine(
-                    degrees=20, translate=(0.15, 0.15), shear=12, scale=(0.85, 1.15)
-                ),
+                T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1),
+                T.RandomAffine(degrees=10, translate=(0.1, 0.1), scale=(0.9, 1.1)),
                 T.ToTensor(),
-                T.RandomErasing(
-                    p=0.25, scale=(0.02, 0.2), ratio=(0.3, 3.3), value="random"
-                ),
                 T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
             ]
         )
@@ -310,7 +298,9 @@ def train_one_fold(
     for p in model.features.parameters():
         p.requires_grad = False
 
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), lr=lr, weight_decay=1e-5
+    )
 
     # Cosine schedule with warmup
     warmup_epochs = max(1, epochs // 10)
@@ -328,6 +318,10 @@ def train_one_fold(
 
     # Losses with class weights
     ce_losses: Dict[str, nn.Module] = {}
+    head_loss_weights: Dict[str, float] = {k: 1.0 for k in class_counts.keys()}
+    # Prioritize FilmSimulation classification
+    if 'FilmSimulation' in head_loss_weights:
+        head_loss_weights['FilmSimulation'] = 3.5
     for name, num_classes in class_counts.items():
         # Build weight tensor aligned by class index
         weights = class_weights.get(name, {})
@@ -336,12 +330,15 @@ def train_one_fold(
             if 0 <= int(idx) < num_classes:
                 w_t[int(idx)] = float(w)
         if name in severely_imbalanced:
+            # Use focal loss when imbalance is severe
             ce_losses[name] = FocalLoss(weight=w_t)
         else:
-            ce_losses[name] = nn.CrossEntropyLoss(weight=w_t)
+            # Mild label smoothing improves generalization for style labels
+            ce_losses[name] = nn.CrossEntropyLoss(weight=w_t, label_smoothing=0.02)
+    # Downweight numeric head to focus more on FilmSimulation accuracy
     huber = nn.SmoothL1Loss()
 
-    history = {"train_loss": [], "val_loss": []}
+    history = {"train_loss": [], "val_loss": [], "val_fs_top1": [], "val_fs_top5": []}
 
     def run_epoch(loader: DataLoader, train_mode: bool):
         if train_mode:
@@ -355,6 +352,11 @@ def train_one_fold(
         total: Dict[str, int] = {k: 0 for k in class_counts.keys()}
         mae_sum = 0.0
         mae_count = 0
+        film_top5_correct = 0
+        film_total = 0
+        # For per-head criterion loss tracking (avg over samples)
+        head_ce_sum: Dict[str, float] = {k: 0.0 for k in class_counts.keys()}
+        num_l1_sum: float = 0.0
         with torch.set_grad_enabled(train_mode):
             for images, cat_targets, num_targets in loader:
                 images = images.to(device=DEVICE, non_blocking=True).contiguous(
@@ -373,10 +375,12 @@ def train_one_fold(
                     enabled=torch.cuda.is_available(), device_type="cuda"
                 ):
                     cat_logits, num_out = model(images)
+                    # Compute all losses in float32 to avoid dtype mismatch with AMP
                     loss = 0.0
                     for name, logits in cat_logits.items():
-                        loss += ce_losses[name](logits, cat_targets_t[name])
-                    loss += huber(num_out, num_targets)
+                        logits_f = logits.float()
+                        loss += head_loss_weights[name] * ce_losses[name](logits_f, cat_targets_t[name])
+                    loss += 0.5 * huber(num_out.float(), num_targets)
 
                 if train_mode:
                     scaler.scale(loss).backward()
@@ -395,13 +399,29 @@ def train_one_fold(
                         pred = torch.argmax(logits, dim=1)
                         correct[name] += int((pred == cat_targets_t[name]).sum().item())
                         total[name] += bs
-                    mae_sum += F.l1_loss(num_out, num_targets, reduction="sum").item()
+                        # Per-head criterion loss (without head-level weighting) in float32
+                        ce_val = ce_losses[name](logits.float(), cat_targets_t[name])
+                        head_ce_sum[name] += float(ce_val.item()) * bs
+                    # FilmSimulation top-5 accuracy accumulation
+                    if 'FilmSimulation' in cat_logits:
+                        fs_logits = cat_logits['FilmSimulation']
+                        k = min(5, fs_logits.size(1))
+                        topk = fs_logits.topk(k=k, dim=1).indices
+                        targets = cat_targets_t['FilmSimulation'].unsqueeze(1)
+                        film_top5_correct += int((topk == targets).any(dim=1).sum().item())
+                        film_total += bs
+                    l1_batch_sum = F.l1_loss(num_out, num_targets, reduction="sum").item()
+                    mae_sum += l1_batch_sum
+                    num_l1_sum += l1_batch_sum
                     mae_count += num_targets.numel()
         avg_loss = total_loss / max(n, 1)
         # compute metrics
         metrics = {
             "acc": {k: (correct[k] / max(1, total[k])) for k in correct},
             "mae": (mae_sum / max(1, mae_count)),
+            "film_top5": (film_top5_correct / max(1, film_total)) if film_total > 0 else 0.0,
+            "ce": {k: (head_ce_sum[k] / max(1, total[k])) for k in head_ce_sum},
+            "num_l1": (num_l1_sum / max(1, mae_count)) if mae_count > 0 else 0.0,
         }
         return avg_loss, metrics
 
@@ -413,21 +433,26 @@ def train_one_fold(
         if epoch == freeze_epochs:
             for p in model.features.parameters():
                 p.requires_grad = True
-            optimizer = optim.Adam(model.parameters(), lr=lr)
+            optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
             scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
         train_loss, train_metrics = run_epoch(train_loader, True)
         val_loss, val_metrics = run_epoch(val_loader, False)
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
+        # Track FilmSimulation metrics
+        fs_top1 = float(val_metrics["acc"].get("FilmSimulation", 0.0))
+        fs_top5 = float(val_metrics.get("film_top5", 0.0))
+        history["val_fs_top1"].append(fs_top1)
+        history["val_fs_top5"].append(fs_top5)
         # step scheduler per epoch
         scheduler.step()
         # Logging concise metrics
-        head_accs = " ".join(
-            [f"{k[:6]}:{val_metrics['acc'][k] * 100:.1f}%" for k in class_counts.keys()]
-        )
+        head_accs = " ".join([f"{k[:6]}:{val_metrics['acc'][k] * 100:.1f}%" for k in class_counts.keys()])
+        head_ces = " ".join([f"{k[:6]}:{val_metrics['ce'][k]:.2f}" for k in class_counts.keys()])
+        fs_top5_str = f" FS@5:{val_metrics.get('film_top5', 0.0)*100:.1f}%"
         print(
-            f"Epoch {epoch + 1}/{epochs} - train_loss: {train_loss:.4f} - val_loss: {val_loss:.4f} - val_mae: {val_metrics['mae']:.4f} - {head_accs}"
+            f"Epoch {epoch + 1}/{epochs} - train_loss: {train_loss:.4f} - val_loss: {val_loss:.4f} - val_mae: {val_metrics['mae']:.4f} - {head_accs}{fs_top5_str} | val_ce: {head_ces}"
         )
         if val_loss < best_val - 1e-4:
             best_val = val_loss
@@ -500,7 +525,7 @@ def train_with_cv(
         model = build_model(class_counts, num_numeric)
         # Detect severely imbalanced heads on the training subset
         severely_imbalanced = detect_severely_imbalanced(
-            train_subset, encoders, threshold=10.0
+            train_subset, encoders, threshold=5.0
         )
         model, history = train_one_fold(
             model,
@@ -511,14 +536,23 @@ def train_with_cv(
             class_weights,
             epochs=150,
             lr=1e-4,
-            freeze_epochs=5,
+            freeze_epochs=2,
         )
 
         fold_histories.append(history)
         fold_models.append(model)
 
-    # Select best model by min val loss
-    best_fold = int(np.argmin([min(h["val_loss"]) for h in fold_histories]))
+    # Select best model prioritizing FilmSimulation metrics: FS@5, then FS top-1, else lowest val loss
+    scores = []
+    for h in fold_histories:
+        if "val_fs_top5" in h and len(h["val_fs_top5"]) > 0:
+            scores.append(float(max(h["val_fs_top5"])))
+        elif "val_fs_top1" in h and len(h["val_fs_top1"]) > 0:
+            scores.append(float(max(h["val_fs_top1"])))
+        else:
+            # Use negative val loss so higher is better for argmax
+            scores.append(-float(min(h["val_loss"])))
+    best_fold = int(np.argmax(scores))
     best_model = fold_models[best_fold]
     return best_model, fold_histories[best_fold], class_counts, num_numeric
 
@@ -537,10 +571,24 @@ def main():
     )
 
     print("\n=== FINAL RESULTS ===")
-    best_epoch = int(np.argmin(history["val_loss"]))
+    # Choose best epoch by FS@5, fallback to FS top-1, then val loss
+    if "val_fs_top5" in history and len(history["val_fs_top5"]) > 0:
+        best_epoch = int(np.argmax(history["val_fs_top5"]))
+        crit = "FS@5"
+        crit_value = float(history["val_fs_top5"][best_epoch]) * 100.0
+    elif "val_fs_top1" in history and len(history["val_fs_top1"]) > 0:
+        best_epoch = int(np.argmax(history["val_fs_top1"]))
+        crit = "FS@1"
+        crit_value = float(history["val_fs_top1"][best_epoch]) * 100.0
+    else:
+        best_epoch = int(np.argmin(history["val_loss"]))
+        crit = "ValLoss"
+        crit_value = float(history["val_loss"][best_epoch])
+
     best_val_loss = float(history["val_loss"][best_epoch])
     best_train_loss = float(history["train_loss"][best_epoch])
     overfit_ratio = best_val_loss / max(best_train_loss, 1e-8)
+    print(f"Model selected by: {crit} = {crit_value:.2f}")
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Training loss at best epoch: {best_train_loss:.4f}")
     print(f"Overfitting ratio: {overfit_ratio:.2f}")
