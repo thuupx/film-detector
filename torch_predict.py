@@ -6,6 +6,7 @@
 import os
 import pickle
 from typing import Dict
+import argparse
 
 from PIL import Image
 import numpy as np
@@ -20,7 +21,7 @@ from torch_train import (
 
 MODEL_PATH = "model/model.pt"
 TOOLS_PATH = "model/tools.pkl"
-IMAGE_TO_TEST = "test_image.jpg"
+DEFAULT_IMAGE = "test_image.jpg"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -75,6 +76,12 @@ def decode_predictions(
 
 
 def main():
+    # Parse CLI args
+    parser = argparse.ArgumentParser(description="Predict film settings for an image")
+    parser.add_argument("--image", "-i", type=str, default=DEFAULT_IMAGE, help="Path to image file")
+    args = parser.parse_args()
+    image_path = args.image
+
     check_gpu()
 
     if not os.path.exists(MODEL_PATH) or not os.path.exists(TOOLS_PATH):
@@ -82,9 +89,9 @@ def main():
             "\nError: Model or tools file not found. Run torch_train.py first."
         )
         return
-    if not os.path.exists(IMAGE_TO_TEST):
+    if not os.path.exists(image_path):
         print(
-            f"\nError: Test image not found at '{IMAGE_TO_TEST}'. Update IMAGE_TO_TEST."
+            f"\nError: Test image not found at '{image_path}'. Pass with --image."
         )
         return
 
@@ -93,7 +100,7 @@ def main():
     with open(TOOLS_PATH, "rb") as f:
         tools = pickle.load(f)
 
-    ckpt = torch.load(MODEL_PATH, map_location="cpu")
+    ckpt = torch.load(MODEL_PATH, map_location=DEVICE)
     # Support both formats: {'state_dict': ... , metadata...} or raw state_dict
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         state_dict = ckpt["state_dict"]
@@ -118,8 +125,8 @@ def main():
     model.to(DEVICE)
     model.eval()
 
-    print(f"--- Predicting for image: {IMAGE_TO_TEST} ---")
-    x = preprocess_image(IMAGE_TO_TEST).to(DEVICE)
+    print(f"--- Predicting for image: {image_path} ---")
+    x = preprocess_image(image_path).to(DEVICE)
     with torch.no_grad():
         cat_logits, num_out = model(x)
         # Wrap cat logits into tensors with batch dim preserved

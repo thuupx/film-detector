@@ -371,8 +371,7 @@ def get_transforms(is_train: bool = True):
     else:
         return T.Compose(
             [
-                T.Resize(256),
-                T.CenterCrop(IMG_SIZE),
+                T.Resize(IMG_SIZE),
                 T.ToTensor(),
                 T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
             ]
