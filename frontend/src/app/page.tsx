@@ -14,15 +14,23 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleFile = (file?: File) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please drop a valid image file (JPG, PNG, WEBP)");
+      return;
+    }
+    setSelectedImage(file);
+    setImagePreview(URL.createObjectURL(file));
+    setPredictions(null);
+    setError(null);
+  };
 
   const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      setSelectedImage(file);
-      setImagePreview(URL.createObjectURL(file));
-      setPredictions(null);
-      setError(null);
-    }
+    handleFile(file);
   };
 
   const handlePredict = async () => {
@@ -56,10 +64,10 @@ export default function Home() {
       <div className="container mx-auto px-4 py-8">
         <header className="text-center mb-8">
           <h1 className="text-4xl font-bold text-slate-800 dark:text-slate-200 mb-2">
-            Film Settings Detector
+            FujiFilm Simulation Detector
           </h1>
           <p className="text-slate-600 dark:text-slate-400 text-lg">
-            Upload a photo to predict optimal film simulation settings
+            Upload a photo to predict optimal FujiFilm film simulation settings
           </p>
         </header>
 
@@ -72,7 +80,30 @@ export default function Home() {
               </h2>
               
               <div className="space-y-4">
-                <div className="border-2 border-dashed border-slate-300 dark:border-slate-600 rounded-lg p-6 text-center">
+                <div
+                  className={`border-2 border-dashed rounded-lg p-6 text-center transition-colors ${
+                    isDragging
+                      ? "border-blue-500 bg-blue-50 dark:bg-blue-900/20"
+                      : "border-slate-300 dark:border-slate-600"
+                  }`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (!isDragging) setIsDragging(true);
+                  }}
+                  onDragLeave={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsDragging(false);
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setIsDragging(false);
+                    const file = e.dataTransfer.files?.[0];
+                    handleFile(file);
+                  }}
+                >
                   {imagePreview ? (
                     <div className="space-y-4">
                       <div className="relative aspect-video max-w-sm mx-auto">
@@ -103,7 +134,8 @@ export default function Home() {
                     <div className="space-y-4">
                       <div className="text-slate-600 dark:text-slate-400">
                         <p className="text-lg mb-2">Choose an image to analyze</p>
-                        <p className="text-sm">Supports JPG, PNG, and WEBP formats</p>
+                        <p className="text-sm">Drag & drop an image here, or use the button below</p>
+                        <p className="text-xs mt-1">Supports JPG, PNG, and WEBP formats</p>
                       </div>
                       <button
                         onClick={() => fileInputRef.current?.click()}
