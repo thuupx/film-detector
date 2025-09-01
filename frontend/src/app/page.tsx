@@ -178,7 +178,7 @@ export default function Home() {
                           {key.replace(/([A-Z])/g, '$1').trim()}
                         </span>
                         <span className="text-slate-900 dark:text-slate-100 font-mono">
-                          {String(value)}
+                          {String(value).trim() || "Off"}
                         </span>
                       </div>
                     ))}
