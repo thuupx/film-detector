@@ -26,7 +26,6 @@ export class FilmPredictor {
     constructor() {
         // Configure ONNX Runtime for web
         ort.env.wasm.wasmPaths = '/';
-        ort.env.wasm.numThreads = 1; // Single thread for better compatibility
     }
 
     private async loadModel(): Promise<void> {
@@ -47,9 +46,7 @@ export class FilmPredictor {
             }
             const modelBuffer = await modelResponse.arrayBuffer();
 
-            this.session = await ort.InferenceSession.create(modelBuffer, {
-                executionProviders: ['wasm', 'cpu']
-            });
+            this.session = await ort.InferenceSession.create(modelBuffer);
 
             console.log('Model loaded successfully');
         } catch (error) {
