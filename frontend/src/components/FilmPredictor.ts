@@ -138,19 +138,8 @@ export class FilmPredictor {
 
         // Handle numerical outputs
         const numOutput = outputs['numerical_outputs'];
-        console.log('Numerical output:', numOutput);
         if (numOutput) {
             const numData = numOutput.data as Float32Array;
-            console.log('Numerical data:', numData);
-
-            // Optional: quick sanity log to help debug shape mismatches
-            if (numData.length < this.metadata.model_info.numerical_outputs.length) {
-                console.warn('Numerical output length is less than expected', {
-                    got: numData.length,
-                    expected: this.metadata.model_info.numerical_outputs.length
-                });
-            }
-
             for (let i = 0; i < this.metadata.model_info.numerical_outputs.length; i++) {
                 const taskName = this.metadata.model_info.numerical_outputs[i];
                 const raw = numData[i];
@@ -187,18 +176,6 @@ export class FilmPredictor {
             // Run inference
             const feeds = { image: tensor };
             const results = await this.session.run(feeds);
-
-            // Debug: output names and result shapes
-            try {
-                console.log('Session outputNames:', this.session.outputNames);
-                console.log('Result keys:', Object.keys(results));
-                for (const k of Object.keys(results)) {
-                    const t = results[k];
-                    console.log(`Output[${k}] dims=`, (t as any).dims, 'length=', t.data.length);
-                }
-            } catch (e) {
-                console.warn('Logging outputs failed', e);
-            }
 
             // Decode outputs
             const predictions = this.decodeOutputs(results);
