@@ -175,7 +175,7 @@ export default function Home() {
                     {Object.entries(predictions).map(([key, value]) => (
                       <div key={key} className="flex justify-between items-center py-2 border-b border-slate-200 dark:border-slate-700 last:border-b-0">
                         <span className="font-medium text-slate-700 dark:text-slate-300">
-                          {key.replace(/([A-Z])/g, ' $1').trim()}
+                          {key.replace(/([A-Z])/g, '$1').trim()}
                         </span>
                         <span className="text-slate-900 dark:text-slate-100 font-mono">
                           {String(value)}
